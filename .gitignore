@@ -1,0 +1,21 @@
+node_modules/
+.env
+.DS_Store
+dist/
+build/
+*.log
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!mcp.json
+!google-cloud.json.example
+!service-account.json.example
+
+# Credentials
+google-cloud.json
+service-account.json
+firebase-service-account.json
+*.p12
+*.pem
+*.key
