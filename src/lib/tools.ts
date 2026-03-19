@@ -46,9 +46,10 @@ export const tools: Record<string, Tool> = {
       fs.writeFileSync(filePath, cleanCode);
       
       try {
-        // Dynamic import con URL absoluta (evita bugs de imports relativos en ESM) y cache busting
-        const fileUrl = pathToFileURL(filePath).href;
-        const mod = await import(`${fileUrl}?t=${Date.now()}`);
+        // Generar una ruta absoluta limpia y forzar la recarga con un timestamp único
+        const absolutePath = path.resolve(filePath);
+        const fileUrl = pathToFileURL(absolutePath).href;
+        const mod = await import(`${fileUrl}?update=${Date.now()}`);
         const newTool = mod.default;
 
         if (newTool && newTool.name && newTool.handler) {
@@ -59,6 +60,33 @@ export const tools: Record<string, Tool> = {
         }
       } catch (e: any) {
         return `Error fatal de compilacion al importar la herramienta: ${e.message}\nCorrige el codigo e intentalo de nuevo.`;
+      }
+    }
+  },
+  execute_command: {
+    name: 'execute_command',
+    description: 'Ejecuta un comando en la terminal (bash/shell). Úsalo para instalar dependencias, correr scripts de python/node, buscar archivos, o hacer cualquier tarea que requiera la línea de comandos para cumplir con el objetivo del usuario. El output será el stdout/stderr del comando.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'El comando de shell a ejecutar (ej. "npm install axios", "python3 script.py", "ls -l")' }
+      },
+      required: ['command']
+    },
+    handler: async ({ command }: { command: string }) => {
+      const { exec } = await import('child_process');
+      const util = await import('util');
+      const execPromise = util.promisify(exec);
+      
+      try {
+        console.log(`[Tool] Ejecutando comando: ${command}`);
+        const { stdout, stderr } = await execPromise(command, { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 5 });
+        if (stderr && !stdout) {
+           return `Ejecución completada con salida en stderr (puede ser info o warning):\n${stderr.substring(0, 4000)}`;
+        }
+        return `Salida del comando:\n${stdout.substring(0, 4000)}${stderr ? `\nErrores/Warnings:\n${stderr.substring(0, 4000)}` : ''}`;
+      } catch (error: any) {
+        return `Falló el comando. Código de salida: ${error.code}\nOutput de error:\n${error.message.substring(0, 4000)}`;
       }
     }
   }

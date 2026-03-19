@@ -1,10 +1,8 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import fs from 'fs';
 import path from 'path';
-import type { Tool } from './tools.js';
+import { MCPRegistry, type ITool } from '@everworker/oneringai';
 
-export const loadMCPTools = async (toolsRecord: Record<string, Tool>) => {
+export const loadMCPTools = async (toolsRecord: Record<string, any>) => {
   const configPath = path.join(process.cwd(), 'mcp.json');
   if (!fs.existsSync(configPath)) return;
 
@@ -14,41 +12,36 @@ export const loadMCPTools = async (toolsRecord: Record<string, Tool>) => {
 
     for (const [serverName, serverConfig] of Object.entries(config.mcpServers || {})) {
       const { command, args, env } = serverConfig as any;
-      console.log(`Connecting to MCP Server: ${serverName}...`);
+      console.log(`Connecting to MCP Server: ${serverName} via OneRingAI...`);
       
-      const transport = new StdioClientTransport({
-        command,
-        args,
-        env: { ...process.env, ...env }
+      const mcpClient = MCPRegistry.create({
+        name: serverName,
+        transport: 'stdio',
+        transportConfig: {
+          command,
+          args,
+          env: { ...process.env, ...env }
+        }
       });
 
-      const client = new Client(
-        { name: "DeltaGravity", version: "1.0.0" },
-        { capabilities: {} }
-      );
-
-      await client.connect(transport);
+      await mcpClient.connect();
       
-      const serverTools = await client.listTools();
-      
-      for (const t of serverTools.tools) {
-        toolsRecord[t.name] = {
-          name: t.name,
-          description: `[MCP: ${serverName}] ${t.description || ''}`,
-          parameters: t.inputSchema,
-          handler: async (callArgs: any) => {
-            const result = await client.callTool({
-              name: t.name,
-              arguments: callArgs
-            });
-            // Result content is an array of parts
-            return (result.content as any[]).map((c: any) => c.text).join('\n');
-          }
+      // Discover and map tools to the toolsRecord
+      const discoveredTools = mcpClient.listTools();
+      for (const t of discoveredTools) {
+        // We wrap it in the expected format for agent.ts if needed, 
+        // but llm.ts now handles the conversion to OneRingAI tool format.
+        toolsRecord[t.definition.function.name] = {
+          name: t.definition.function.name,
+          description: t.definition.function.description,
+          parameters: t.definition.function.parameters,
+          handler: t.execute
         };
-        console.log(`Loaded MCP tool: ${t.name}`);
+        console.log(`Loaded MCP tool (OneRingAI): ${t.definition.function.name}`);
       }
     }
   } catch (err: any) {
-    console.error('Error initializing MCP servers:', err);
+    console.error('Error initializing MCP servers with OneRingAI:', err);
   }
 };
+

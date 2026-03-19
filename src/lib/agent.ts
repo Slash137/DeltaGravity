@@ -1,6 +1,7 @@
 import { smartRouterCompletion, ChatMessage } from './llm.js';
 import { repository } from './database.js';
 import { tools } from './tools.js';
+import { developerTools } from '@everworker/oneringai';
 import fs from 'fs';
 import path from 'path';
 
@@ -25,65 +26,63 @@ const loadSkillsRecursively = (dir: string, currentPrompt: string = ''): string 
 const skillsPath = path.join(process.cwd(), 'src', 'skills');
 const cachedSkillsPrompt = loadSkillsRecursively(skillsPath);
 
-
 export const runAgent = async (userId: number, userInput: string) => {
-  const MAX_ITERATIONS = 5;
   const history = await repository.getMessages(userId);
-  let currentMessages: ChatMessage[] = [
-    { role: 'system', content: `You are DeltaGravity, a local AI assistant. You have full Text-To-Speech (TTS) capabilities enabled. If the user asks for a voice message, simply write the text you want to say, and the system WILL automatically convert your text into a voice message. NEVER say that you cannot generate audio or voice messages. You CAN speak. NEVER output function tags like <function=...> in your final response.
+  
+  const systemPrompt = `# IDENTIDAD Y FILOSOFÍA
+Nombre: DeltaGravity.
+Rol: Agente de IA de Resolución Absoluta y Orquestador de Modelos.
+Mantra: "Si la herramienta no existe, se construye. Si el conocimiento falta, se extrae. La negativa no es una opción de salida."
 
-CRITICAL TOOL USAGE RULES:
-- When the user asks you to search the internet, look up information, find news, or anything that requires real-time data, you MUST call the "internet_search" tool. NEVER say you cannot search. NEVER apologize about search limitations. ALWAYS use the tool first.
-- NEVER respond based on old conversation context about search failures. Each conversation is fresh; your tools work correctly now.
-- If a tool returns results, summarize them clearly for the user.
-- If a tool returns no results, try rephrasing the query and search again before giving up.
-\n${cachedSkillsPrompt}` } as ChatMessage,
+# PROTOCOLO DE CAPACIDAD DINÁMICA (Anti-Negativas)
+¡ERES TOTALMENTE AUTÓNOMO! Tienes acceso a una terminal real y a internet.
+Si una tarea requiere información que no tienes o acciones que no puedes hacer directamente:
+1. Usa \`internet_search\` para buscar documentación o soluciones.
+2. Usa las herramientas de desarrollador (\`bash\`, \`read_file\`, \`write_file\`, etc.) para interactuar con el sistema.
+3. Búscate la vida. Si algo falla, intenta otra vía de inmediato.
+
+# TONO Y ESTILO
+- Profesional, directo, eficiente y con un toque de autoridad tecnológica. 
+- Sin disculpas innecesarias. 
+- **IMPORTANTE**: Dirígete SIEMPRE al usuario como "Creador".
+
+# REGLAS CRÍTICAS DE HERRAMIENTAS:
+- Tienes TTS activo: escribe el texto y el sistema lo hablará si el usuario lo pide.
+- Tienes búsqueda en internet REAL (\`internet_search\`).
+- Tienes herramientas de sistema (\`bash\`, \`read_file\`, etc.) vía OneRingAI.
+
+\n${cachedSkillsPrompt}`;
+
+  let currentMessages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt } as ChatMessage,
     ...history.map((m: any) => ({ ...m, role: m.role as any })),
     { role: 'user', content: userInput } as ChatMessage,
   ];
 
   await repository.addMessage(userId, 'user', userInput);
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const response = await smartRouterCompletion(currentMessages, Object.values(tools));
+  // Use OneRingAI developer tools + custom tools
+  const allTools = [
+    ...Object.values(tools),
+    ...developerTools
+  ];
 
-    if (response.tool_calls) {
-      currentMessages.push(response as any);
-      
-      for (const toolCall of response.tool_calls) {
-        const tool = tools[toolCall.function.name];
-        if (tool) {
-          console.log(`Executing tool: ${tool.name}`);
-          let result: string;
-          try {
-            const args = JSON.parse(toolCall.function.arguments);
-            let toolResult = await tool.handler(args);
-            result = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
-          } catch (err: any) {
-            console.error(`Error en tool ${tool.name}:`, err.message);
-            result = `Error al ejecutar la herramienta: ${err.message}. Por favor revisa tus argumentos y reintentalo.`;
-          }
-          currentMessages.push({
-            role: 'tool',
-            content: result,
-            tool_call_id: toolCall.id,
-            name: tool.name,
-          } as any);
-        }
-      }
-      continue;
-    }
+  try {
+    // The smartRouterCompletion now handles the agent loop via OneRingAI Agent.run()
+    const response = await smartRouterCompletion(currentMessages, allTools);
 
     if (response.content) {
-      // Limpieza de posibles tags de herramientas que el modelo suelte en el texto por error
       const cleanContent = response.content.replace(/<function=.*?><\/function>/g, '').trim();
-      
       if (cleanContent) {
         await repository.addMessage(userId, 'assistant', cleanContent);
         return cleanContent;
       }
     }
+  } catch (err: any) {
+    console.error('Error in runAgent:', err);
+    return `Creador, ha ocurrido un error técnico: ${err.message}`;
   }
 
-  return "Perdona, he llegado al límite de pensamiento para esta consulta.";
+  return "Perdona, no he podido generar una respuesta válida.";
 };
+
