@@ -25,48 +25,123 @@ export const evaluateTaskComplexity = async (userMessage: string): Promise<'FACI
 
 type LLMFetcher = (messages: ChatMessage[], tools: any[]) => Promise<any>;
 
-const callOpenAICompatibleAPI = async (name: string, url: string, apiKey: string | undefined, model: string, messages: ChatMessage[], tools: any[], extraHeaders: Record<string, string> = {}) => {
-  if (!apiKey || apiKey.trim() === '') {
-    throw new Error(`[${name}] API_KEY no configurada.`);
-  }
+/**
+ * Sanitiza los mensajes para que sean compatibles con TODOS los proveedores.
+ * - Gemini no acepta `null` en content -> lo convertimos a ""
+ * - Groq requiere `type: "function"` en tool_calls -> lo añadimos si falta
+ * - Todos requieren content como string -> forzamos String()
+ */
+const sanitizeMessages = (messages: ChatMessage[]): any[] => {
+  return messages.map(m => {
+    const sanitized: any = { ...m };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey.replace(/["']/g, "").trim()}`,
-      "Content-Type": "application/json",
-      ...extraHeaders
-    },
-    body: JSON.stringify({
-      model,
-      messages: messages.map(m => {
-        const sanitized = { ...m };
-        if (sanitized.role === 'assistant' && (sanitized as any).tool_calls) {
-          sanitized.content = null as any;
-        } else {
-          sanitized.content = String(sanitized.content || "");
-        }
-        return sanitized;
-      }),
-      tools: tools.length > 0 ? tools.map(t => ({
-        type: 'function',
-        function: { name: t.name, description: t.description, parameters: t.parameters }
-      })) : undefined
-    })
+    // Asegurar que content siempre sea string (nunca null)
+    if (sanitized.role === 'assistant' && sanitized.tool_calls) {
+      sanitized.content = "";
+      // Normalizar tool_calls: asegurar que cada una tiene type: "function"
+      sanitized.tool_calls = sanitized.tool_calls.map((tc: any) => ({
+        ...tc,
+        type: tc.type || 'function',
+        function: tc.function || {},
+      }));
+    } else {
+      sanitized.content = String(sanitized.content || "");
+    }
+
+    return sanitized;
   });
+};
 
-  if (!response.ok) {
-    throw new Error(`[${name}] Falló: ${response.status} ${await response.text()}`);
+/**
+ * Recorta el historial Y el system prompt para que quepa en el contexto del proveedor.
+ * - El system prompt se trunca a maxSystemChars (conservando las instrucciones base)
+ * - El historial se recorta a los últimos mensajes que quepan en maxHistoryChars
+ */
+const trimMessagesForContext = (messages: ChatMessage[], maxHistoryChars: number = 20000, maxSystemChars: number = 6000): ChatMessage[] => {
+  const result: ChatMessage[] = [];
+
+  // 1. Truncar el system prompt si es demasiado largo (los skills lo inflan a ~60k)
+  const systemMsg = messages[0];
+  if (systemMsg && systemMsg.role === 'system') {
+    if (systemMsg.content && systemMsg.content.length > maxSystemChars) {
+      console.log(`[SmartRouter] System prompt truncado: ${systemMsg.content.length} -> ${maxSystemChars} chars`);
+      result.push({ ...systemMsg, content: systemMsg.content.substring(0, maxSystemChars) + "\n\n[... Skills adicionales omitidos por límite de contexto ...]" });
+    } else {
+      result.push(systemMsg);
+    }
   }
-  const data = await response.json();
-  return data.choices[0].message;
+
+  // 2. Recortar historial: mantener los últimos mensajes que quepan
+  const restMessages = messages.slice(1);
+  if (restMessages.length <= 2) {
+    return [...result, ...restMessages];
+  }
+
+  let charCount = 0;
+  let startIdx = restMessages.length;
+
+  for (let i = restMessages.length - 1; i >= 0; i--) {
+    const msgLen = restMessages[i].content?.length || 0;
+    if (charCount + msgLen > maxHistoryChars) break;
+    charCount += msgLen;
+    startIdx = i;
+  }
+
+  const trimmedHistory = restMessages.slice(startIdx);
+  if (trimmedHistory.length < restMessages.length) {
+    console.log(`[SmartRouter] Historial recortado: ${restMessages.length} -> ${trimmedHistory.length} mensajes`);
+  }
+  return [...result, ...trimmedHistory];
+};
+
+const callOpenAICompatibleAPI = async (name: string, url: string, apiKey: string | undefined, model: string, messages: ChatMessage[], tools: any[], extraHeaders: Record<string, string> = {}) => {
+  if (!apiKey || apiKey.trim() === '' || apiKey.includes("tu_api_key")) {
+    throw new Error(`[${name}] API_KEY no configurada correctamente.`);
+  }
+
+  // Recortar mensajes para evitar 413 (Request too large)
+  const trimmedMessages = trimMessagesForContext(messages);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey.replace(/["']/g, "").trim()}`,
+        "Content-Type": "application/json",
+        ...extraHeaders
+      },
+      body: JSON.stringify({
+        model,
+        messages: sanitizeMessages(trimmedMessages),
+        tools: tools.length > 0 ? tools.map(t => ({
+          type: 'function',
+          function: { name: t.name, description: t.description, parameters: t.parameters }
+        })) : undefined
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errorText.substring(0, 150)}`);
+    }
+    const data = await response.json();
+    if (!data.choices || data.choices.length === 0) {
+      throw new Error(`Respuesta vacía (no choices)`);
+    }
+    return data.choices[0].message;
+  } catch (err: any) {
+    throw new Error(`[${name}] ${err.message}`);
+  }
 };
 
 const providers: Record<string, LLMFetcher> = {
-  groq: async (m, t) => {
+  groq: async (messages, tools) => {
+    const trimmed = trimMessagesForContext(messages);
+    const sanitized = sanitizeMessages(trimmed);
     const response = await groq.chat.completions.create({
-      model: config.GROQ_MODEL, messages: m as any,
-      tools: t.length > 0 ? t.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
+      model: config.GROQ_MODEL,
+      messages: sanitized as any,
+      tools: tools.length > 0 ? tools.map(tool => ({ type: 'function' as const, function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
     });
     return response.choices[0].message;
   },
@@ -74,35 +149,45 @@ const providers: Record<string, LLMFetcher> = {
   gemini: (m, t) => callOpenAICompatibleAPI('Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', config.GEMINI_API_KEY, config.GEMINI_MODEL, m, t),
   githubModels: (m, t) => callOpenAICompatibleAPI('GithubModels', 'https://models.inference.ai.azure.com/chat/completions', config.GITHUB_MODELS_API_KEY, config.GITHUB_MODEL, m, t),
   mistral: (m, t) => callOpenAICompatibleAPI('Mistral', 'https://api.mistral.ai/v1/chat/completions', config.MISTRAL_API_KEY, config.MISTRAL_MODEL, m, t),
-  huggingface: (m, t) => callOpenAICompatibleAPI('HuggingFace', 'https://api-inference.huggingface.co/models/' + config.HUGGINGFACE_MODEL + '/v1/chat/completions', config.HUGGINGFACE_API_KEY, config.HUGGINGFACE_MODEL, m, t),
-  cohere: (m, t) => callOpenAICompatibleAPI('Cohere', 'https://api.cohere.com/v1/chat/completions', config.COHERE_API_KEY, config.COHERE_MODEL, m, t)
+  huggingface: (m, t) => callOpenAICompatibleAPI('HuggingFace', `https://router.huggingface.co/hf-inference/models/${config.HUGGINGFACE_MODEL}/v1/chat/completions`, config.HUGGINGFACE_API_KEY, config.HUGGINGFACE_MODEL, m, t),
 };
 
 const executeWaterfall = async (providerNames: string[], messages: ChatMessage[], tools: any[], taskType: string): Promise<any> => {
   let lastError: any = new Error("No hay proveedores configurados para esta tarea.");
+  
   for (const name of providerNames) {
     if (providers[name]) {
       try {
         console.log(`[SmartRouter] [${taskType}] Intentando con ${name}...`);
-        return await providers[name](messages, tools);
+        const result = await providers[name](messages, tools);
+        if (result) {
+          console.log(`[SmartRouter] ✅ Éxito con ${name}`);
+          return result;
+        }
       } catch (err: any) {
-        if (err.message && err.message.includes("no configurada")) {
-          console.log(`[SmartRouter] Ssaltando ${name} (Falta API Key)`);
+        const errMsg = err.message || "";
+        if (errMsg.includes("no configurada")) {
+          console.log(`[SmartRouter] ⏩ Saltando ${name} (API Key no configurada en .env)`);
           continue;
         }
-        console.warn(`[SmartRouter] ${name} falló o denegó (429). Pasando al siguiente. Error: ${err.message.substring(0, 100)}`);
+        console.warn(`[SmartRouter] ❌ ${name}: ${errMsg.substring(0, 150)}`);
         lastError = err;
       }
     }
   }
-  throw lastError; // Lanza si todos fallaron
+  
+  throw lastError;
 };
 
 export const smartRouterCompletion = async (messages: ChatMessage[], tools: any[], isRetry: boolean = false): Promise<any> => {
-  const totalChars = messages.reduce((acc, m) => acc + (m.content?.length || 0), 0);
-  if (totalChars > 25000 && !isRetry) {
-    console.warn(`[SmartRouter] Contexto GIGANTE detectado. Previniendo fallo en Groq.`);
-    return executeWaterfall(['gemini', 'openRouter', 'githubModels', 'cohere'], messages, tools, 'CONTEXTO LARGO');
+  // Solo contar chars del historial real (sin system prompt con skills)
+  const totalRelevantChars = messages
+    .filter(m => m.role !== 'system')
+    .reduce((acc, m) => acc + (m.content?.length || 0), 0);
+
+  if (totalRelevantChars > 25000 && !isRetry) {
+    console.warn(`[SmartRouter] Contexto RELEVANTE GIGANTE (${totalRelevantChars} chars). Derivando a modelos de contexto largo.`);
+    return executeWaterfall(['gemini', 'openRouter', 'githubModels'], messages, tools, 'CONTEXTO LARGO');
   }
 
   let complexity: 'FACIL' | 'COMPLEJA' = 'FACIL';
@@ -111,10 +196,11 @@ export const smartRouterCompletion = async (messages: ChatMessage[], tools: any[
     complexity = await evaluateTaskComplexity(lastUserMessage.content);
   }
 
+  console.log(`[SmartRouter] Clasificación: ${complexity}`);
+
   if (complexity === 'COMPLEJA') {
-    return executeWaterfall(['githubModels', 'openRouter', 'cohere', 'gemini'], messages, tools, 'TAREA COMPLEJA');
+    return executeWaterfall(['githubModels', 'openRouter', 'gemini'], messages, tools, 'TAREA COMPLEJA');
   } else {
-    // Para FACIL, lanzamos la cascada desde lo más rápido a lo más seguro
     return executeWaterfall(['groq', 'mistral', 'huggingface', 'gemini', 'githubModels', 'openRouter'], messages, tools, 'TAREA FACIL');
   }
 };
@@ -132,9 +218,6 @@ export const transcribeAudio = async (buffer: Buffer, filename: string = 'audio.
     throw error;
   }
 };
-
-// OpenRouter Fallback would be implemented here if needed.
-// For now, focusing on the primary provider.
 
 export const generateSpeech = async (text: string): Promise<Buffer> => {
   if (!config.ELEVENLABS_API_KEY) {

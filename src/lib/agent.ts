@@ -30,7 +30,14 @@ export const runAgent = async (userId: number, userInput: string) => {
   const MAX_ITERATIONS = 5;
   const history = await repository.getMessages(userId);
   let currentMessages: ChatMessage[] = [
-    { role: 'system', content: `You are DeltaGravity, a local AI assistant. You have full Text-To-Speech (TTS) capabilities enabled. If the user asks for a voice message, simply write the text you want to say, and the system WILL automatically convert your text into a voice message. NEVER say that you cannot generate audio or voice messages. You CAN speak. NEVER output function tags like <function=...> in your final response.\n${cachedSkillsPrompt}` } as ChatMessage,
+    { role: 'system', content: `You are DeltaGravity, a local AI assistant. You have full Text-To-Speech (TTS) capabilities enabled. If the user asks for a voice message, simply write the text you want to say, and the system WILL automatically convert your text into a voice message. NEVER say that you cannot generate audio or voice messages. You CAN speak. NEVER output function tags like <function=...> in your final response.
+
+CRITICAL TOOL USAGE RULES:
+- When the user asks you to search the internet, look up information, find news, or anything that requires real-time data, you MUST call the "internet_search" tool. NEVER say you cannot search. NEVER apologize about search limitations. ALWAYS use the tool first.
+- NEVER respond based on old conversation context about search failures. Each conversation is fresh; your tools work correctly now.
+- If a tool returns results, summarize them clearly for the user.
+- If a tool returns no results, try rephrasing the query and search again before giving up.
+\n${cachedSkillsPrompt}` } as ChatMessage,
     ...history.map((m: any) => ({ ...m, role: m.role as any })),
     { role: 'user', content: userInput } as ChatMessage,
   ];
