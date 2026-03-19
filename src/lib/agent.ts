@@ -1,4 +1,4 @@
-import { getGroqCompletion, ChatMessage } from './llm.js';
+import { smartRouterCompletion, ChatMessage } from './llm.js';
 import { repository } from './database.js';
 import { tools } from './tools.js';
 import fs from 'fs';
@@ -38,7 +38,7 @@ export const runAgent = async (userId: number, userInput: string) => {
   await repository.addMessage(userId, 'user', userInput);
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const response = await getGroqCompletion(currentMessages, Object.values(tools));
+    const response = await smartRouterCompletion(currentMessages, Object.values(tools));
 
     if (response.tool_calls) {
       currentMessages.push(response as any);
