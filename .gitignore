@@ -9,6 +9,7 @@ build/
 !package-lock.json
 !tsconfig.json
 !mcp.json
+!hooks.json
 !google-cloud.json.example
 !service-account.json.example
 

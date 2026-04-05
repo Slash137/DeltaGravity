@@ -1,0 +1,9 @@
+[Unit]
+Description=DeltaGravity container watchdog
+After=docker.service deltagravity.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cayetano/Proyectos/DeltaGravity
+ExecStart=/home/cayetano/Proyectos/DeltaGravity/scripts/watchdog.sh

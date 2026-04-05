@@ -1,6 +1,8 @@
+const USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
 export default {
   name: "internet_search",
-  description: "Búsqueda absoluta en internet con simulación de navegación real. Devuelve títulos, links y fragmentos de noticias actualizadas.",
+  description: "Búsqueda en internet. Devuelve títulos, links y fragmentos de resultados. IMPORTANTE: Si necesitas datos concretos de una página, usa después 'fetch_webpage' con la URL del resultado más relevante para leer su contenido completo. Para consultas sobre el tiempo/clima, usa la herramienta 'weather' en su lugar.",
   parameters: {
     type: "object",
     properties: {
@@ -10,114 +12,185 @@ export default {
   },
   handler: async (args: any) => {
     const query = args.query;
-    console.log(`\n[Internet Search] Ejecutando búsqueda absoluta para: "${query}"...`);
+    console.log(`\n[Internet Search] Buscando: "${query}"...`);
 
-    // Prioridad 1: Google Custom Search (si el Creador lo tiene)
-    const googleResult = await tryGoogleSearch(query);
-    if (googleResult) return googleResult;
+    // Intentar todas las fuentes en orden
+    const strategies = [
+      () => tryDuckDuckGoLite(query),
+      () => tryDuckDuckGoHTML(query),
+      () => trySearXNG(query, "https://searx.be"),
+      () => trySearXNG(query, "https://search.bus-hit.me"),
+      () => trySearXNG(query, "https://searx.tiekoetter.com"),
+    ];
 
-    // Prioridad 2: DuckDuckGo con Simulación de Navegador Real (VQD + Cookies)
-    const ddgResult = await tryDuckDuckGoAdvanced(query);
-    if (ddgResult) return ddgResult;
+    for (const strategy of strategies) {
+      try {
+        const result = await strategy();
+        if (result) return result;
+      } catch (e: any) {
+        console.warn(`[Search] Falló una estrategia: ${e.message?.substring(0, 100)}`);
+      }
+    }
 
-    // Prioridad 3: SearXNG (Instancias estables)
-    const searxResult = await trySearXNG(query);
-    if (searxResult) return searxResult;
-
-    return `Creador, he agotado todas las vías de búsqueda. No hay resultados para "${query}". Es posible que el término sea demasiado específico o haya un bloqueo regional masivo.`;
+    return `No se encontraron resultados para "${query}". Los motores de búsqueda no respondieron.`;
   }
 };
 
-async function tryGoogleSearch(query: string): Promise<string | null> {
-  const api_key = process.env.GOOGLE_CUSTOM_SEARCH_API_KEY;
-  const cx = process.env.GOOGLE_CUSTOM_SEARCH_CX;
-  if (!api_key || !cx) return null;
-  try {
-    const url = `https://www.googleapis.com/customsearch/v1?key=${api_key}&cx=${cx}&q=${encodeURIComponent(query)}`;
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const data = await response.json();
-    const items = data.items || [];
-    if (items.length === 0) return null;
-    console.log(`[Search] ✅ Datos extraídos de Google API.`);
-    let summary = `Fuentes consultadas (Google):\n\n`;
-    items.slice(0, 5).forEach((item: any, i: number) => {
-      summary += `[${i + 1}] ${item.title}\nURL: ${item.link}\nInfo: ${item.snippet}\n\n`;
+// --- DuckDuckGo Lite (más fiable que la API JSON) ---
+async function tryDuckDuckGoLite(query: string): Promise<string | null> {
+  console.log(`[Search] Intentando DuckDuckGo Lite...`);
+  
+  const response = await fetchWithTimeout(`https://lite.duckduckgo.com/lite/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": USER_AGENT,
+    },
+    body: `q=${encodeURIComponent(query)}`,
+  });
+
+  if (!response.ok) return null;
+  const html = await response.text();
+
+  // Extraer resultados del HTML de DDG Lite
+  const results: { title: string; url: string; snippet: string }[] = [];
+  
+  // DDG Lite tiene links en <a class="result-link"> y snippets en <td class="result-snippet">
+  const linkRegex = /<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRegex = /<td\s+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+  
+  const links: { url: string; title: string }[] = [];
+  let match;
+  while ((match = linkRegex.exec(html)) !== null) {
+    links.push({ url: match[1], title: cleanHTML(match[2]) });
+  }
+  
+  const snippets: string[] = [];
+  while ((match = snippetRegex.exec(html)) !== null) {
+    snippets.push(cleanHTML(match[1]));
+  }
+
+  for (let i = 0; i < Math.min(links.length, 5); i++) {
+    results.push({
+      title: links[i].title,
+      url: links[i].url,
+      snippet: snippets[i] || "",
     });
-    return summary;
-  } catch (e) { return null; }
+  }
+
+  if (results.length === 0) return null;
+
+  console.log(`[Search] ✅ DuckDuckGo Lite: ${results.length} resultados`);
+  return formatResults("DuckDuckGo", results);
 }
 
-async function tryDuckDuckGoAdvanced(query: string): Promise<string | null> {
-    try {
-        console.log(`[Search] Simulando navegador para DuckDuckGo...`);
-        const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-        
-        // 1. Obtener VQD e Inicializar Cookies
-        const response1 = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, {
-            headers: { "User-Agent": userAgent }
-        });
-        const xhtml = await response1.text();
-        const vqdMatch = xhtml.match(/vqd=["']?([^"']+)["']?/) || xhtml.match(/vqd=([^&]+)/);
-        if (!vqdMatch) return null;
-        const vqd = vqdMatch[1];
+// --- DuckDuckGo HTML (búsqueda normal) ---
+async function tryDuckDuckGoHTML(query: string): Promise<string | null> {
+  console.log(`[Search] Intentando DuckDuckGo HTML...`);
+  
+  const response = await fetchWithTimeout(
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+    {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html",
+      },
+    }
+  );
 
-        // 2. Ejecutar búsqueda con Headers de navegador real
-        const searchUrl = `https://links.duckduckgo.com/d.js?q=${encodeURIComponent(query)}&vqd=${vqd}&s=0&l=es-es&p=1&v7exp=a&ss_m=1`;
-        const response2 = await fetch(searchUrl, {
-            headers: {
-                "User-Agent": userAgent,
-                "Referer": "https://duckduckgo.com/",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Cookie": "l=es-es; vqd=" + vqd
-            }
-        });
+  if (!response.ok) return null;
+  const html = await response.text();
 
-        if (!response2.ok) return null;
-        const text = await response2.text();
-        
-        // Extracción robusta por Regex (por si el JSON está "sucio")
-        const results: any[] = [];
-        const regex = /\{"a":"([\s\S]*?)","t":"([\s\S]*?)","u":"([\s\S]*?)"\}/g;
-        let match;
-        while ((match = regex.exec(text)) !== null && results.length < 5) {
-            results.push({ t: match[2], u: match[3], a: match[1] });
-        }
+  const results: { title: string; url: string; snippet: string }[] = [];
+  
+  // Extraer resultados: cada resultado está en un div con class="result"
+  const resultBlocks = html.split(/class="result\s/);
+  
+  for (let i = 1; i < Math.min(resultBlocks.length, 6); i++) {
+    const block = resultBlocks[i];
+    
+    // Extraer URL
+    const urlMatch = block.match(/href="([^"]*uddg=([^&"]*))/);
+    const url = urlMatch ? decodeURIComponent(urlMatch[2]) : "";
+    
+    // Extraer título
+    const titleMatch = block.match(/class="result__a"[^>]*>([\s\S]*?)<\/a>/);
+    const title = titleMatch ? cleanHTML(titleMatch[1]) : "";
+    
+    // Extraer snippet
+    const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/(?:td|div|span)>/);
+    const snippet = snippetMatch ? cleanHTML(snippetMatch[1]) : "";
+    
+    if (url && title) {
+      results.push({ title, url, snippet });
+    }
+  }
 
-        if (results.length === 0) return null;
+  if (results.length === 0) return null;
 
-        console.log(`[Search] ✅ Éxito con DuckDuckGo Advanced.`);
-        let summary = `Fuentes consultadas (DuckDuckGo):\n\n`;
-        results.forEach((r, i) => {
-            summary += `[${i + 1}] ${decodeHTMLEntities(r.t)}\nURL: ${r.u}\nInfo: ${decodeHTMLEntities(r.a)}\n\n`;
-        });
-        return summary;
-    } catch (e) { return null; }
+  console.log(`[Search] ✅ DuckDuckGo HTML: ${results.length} resultados`);
+  return formatResults("DuckDuckGo", results);
 }
 
-async function trySearXNG(query: string): Promise<string | null> {
-    try {
-        console.log(`[Search] Intentando SearXNG (Backup)...`);
-        const response = await fetch(`https://searx.be/search?q=${encodeURIComponent(query)}&format=json`, {
-            headers: { "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/121.0.0.0" }
-        });
-        if (!response.ok) return null;
-        const data = await response.json();
-        const results = data.results || [];
-        if (results.length === 0) return null;
-        console.log(`[Search] ✅ Éxito con SearXNG.`);
-        let summary = `Fuentes consultadas (SearXNG):\n\n`;
-        results.slice(0, 5).forEach((r: any, i: number) => {
-            summary += `[${i + 1}] ${r.title}\nURL: ${r.url}\nInfo: ${r.content || ""}\n\n`;
-        });
-        return summary;
-    } catch (e) { return null; }
+// --- SearXNG (múltiples instancias) ---
+async function trySearXNG(query: string, baseUrl: string): Promise<string | null> {
+  console.log(`[Search] Intentando SearXNG (${baseUrl})...`);
+  
+  const response = await fetchWithTimeout(
+    `${baseUrl}/search?q=${encodeURIComponent(query)}&format=json&language=es`,
+    {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+      },
+    }
+  );
+
+  if (!response.ok) return null;
+  const data = await response.json();
+  const rawResults = data.results || [];
+  
+  if (rawResults.length === 0) return null;
+
+  const results = rawResults.slice(0, 5).map((r: any) => ({
+    title: r.title || "",
+    url: r.url || "",
+    snippet: r.content || "",
+  }));
+
+  console.log(`[Search] ✅ SearXNG (${baseUrl}): ${results.length} resultados`);
+  return formatResults("SearXNG", results);
 }
 
-function decodeHTMLEntities(text: string): string {
-    if (!text) return "";
-    return text
-        .replace(/\\x27/g, "'").replace(/\\x22/g, '"').replace(/\\x2d/g, '-')
-        .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ')
-        .replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+// --- Utilidades ---
+function formatResults(source: string, results: { title: string; url: string; snippet: string }[]): string {
+  let output = `Resultados de búsqueda (${source}):\n\n`;
+  results.forEach((r, i) => {
+    output += `[${i + 1}] ${r.title}\nURL: ${r.url}\n${r.snippet}\n\n`;
+  });
+  return output;
+}
+
+function cleanHTML(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs: number = 15000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }

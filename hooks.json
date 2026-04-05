@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/send-codex-stop-telegram.mjs\"",
+            "statusMessage": "enviando resumen a Telegram",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

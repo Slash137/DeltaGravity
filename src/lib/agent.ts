@@ -1,10 +1,13 @@
-import { smartRouterCompletion, ChatMessage } from './llm.js';
+import { OpenAI } from 'openai';
 import { repository } from './database.js';
 import { tools } from './tools.js';
-import { developerTools } from '@everworker/oneringai';
 import fs from 'fs';
 import path from 'path';
+import { config } from '../config.js';
+import { getLaunchProfile } from './launch-profiles.js';
+import { buildDeltaSystemPrompt } from './persona.js';
 
+// --- Skills loader ---
 const loadSkillsRecursively = (dir: string, currentPrompt: string = ''): string => {
   let prompt = currentPrompt;
   if (fs.existsSync(dir)) {
@@ -26,63 +29,157 @@ const loadSkillsRecursively = (dir: string, currentPrompt: string = ''): string 
 const skillsPath = path.join(process.cwd(), 'src', 'skills');
 const cachedSkillsPrompt = loadSkillsRecursively(skillsPath);
 
-export const runAgent = async (userId: number, userInput: string) => {
-  const history = await repository.getMessages(userId);
-  
-  const systemPrompt = `# IDENTIDAD Y FILOSOFÍA
-Nombre: DeltaGravity.
-Rol: Agente de IA de Resolución Absoluta y Orquestador de Modelos.
-Mantra: "Si la herramienta no existe, se construye. Si el conocimiento falta, se extrae. La negativa no es una opción de salida."
+// --- OpenAI-compatible client pointing to Ollama ---
+const ollamaClient = new OpenAI({
+  baseURL: `${config.OLLAMA_BASE_URL.replace(/\/+$/, '')}/v1`,
+  apiKey: config.OLLAMA_API_KEY || 'ollama',
+  timeout: 240_000, // 4 minutos para modelos locales lentos
+});
 
-# PROTOCOLO DE CAPACIDAD DINÁMICA (Anti-Negativas)
-¡ERES TOTALMENTE AUTÓNOMO! Tienes acceso a una terminal real y a internet.
-Si una tarea requiere información que no tienes o acciones que no puedes hacer directamente:
-1. Usa \`internet_search\` para buscar documentación o soluciones.
-2. Usa las herramientas de desarrollador (\`bash\`, \`read_file\`, \`write_file\`, etc.) para interactuar con el sistema.
-3. Búscate la vida. Si algo falla, intenta otra vía de inmediato.
-
-# TONO Y ESTILO
-- Profesional, directo, eficiente y con un toque de autoridad tecnológica. 
-- Sin disculpas innecesarias. 
-- **IMPORTANTE**: Dirígete SIEMPRE al usuario como "Creador".
-
-# REGLAS CRÍTICAS DE HERRAMIENTAS:
-- Tienes TTS activo: escribe el texto y el sistema lo hablará si el usuario lo pide.
-- Tienes búsqueda en internet REAL (\`internet_search\`).
-- Tienes herramientas de sistema (\`bash\`, \`read_file\`, etc.) vía OneRingAI.
-
-\n${cachedSkillsPrompt}`;
-
-  let currentMessages: ChatMessage[] = [
-    { role: 'system', content: systemPrompt } as ChatMessage,
-    ...history.map((m: any) => ({ ...m, role: m.role as any })),
-    { role: 'user', content: userInput } as ChatMessage,
-  ];
-
-  await repository.addMessage(userId, 'user', userInput);
-
-  // Use OneRingAI developer tools + custom tools
-  const allTools = [
-    ...Object.values(tools),
-    ...developerTools
-  ];
-
-  try {
-    // The smartRouterCompletion now handles the agent loop via OneRingAI Agent.run()
-    const response = await smartRouterCompletion(currentMessages, allTools);
-
-    if (response.content) {
-      const cleanContent = response.content.replace(/<function=.*?><\/function>/g, '').trim();
-      if (cleanContent) {
-        await repository.addMessage(userId, 'assistant', cleanContent);
-        return cleanContent;
-      }
-    }
-  } catch (err: any) {
-    console.error('Error in runAgent:', err);
-    return `Creador, ha ocurrido un error técnico: ${err.message}`;
-  }
-
-  return "Perdona, no he podido generar una respuesta válida.";
+// --- Build OpenAI-format tool definitions from our tools record ---
+const buildToolDefinitions = (): OpenAI.Chat.Completions.ChatCompletionTool[] => {
+  return Object.values(tools).map((t) => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters as Record<string, unknown>,
+    },
+  }));
 };
 
+// --- Execute a single tool call ---
+const executeTool = async (name: string, argsString: string): Promise<string> => {
+  const tool = tools[name];
+  if (!tool) {
+    return `Error: herramienta "${name}" no encontrada.`;
+  }
+
+  let args: any = {};
+  try {
+    args = JSON.parse(argsString);
+  } catch {
+    return `Error: argumentos inválidos para "${name}": ${argsString}`;
+  }
+
+  try {
+    console.log(`[Tool] Ejecutando: ${name}(${JSON.stringify(args).substring(0, 200)})`);
+    const result = await tool.handler(args);
+    console.log(`[Tool] ${name} completado (${result.length} chars)`);
+    return result;
+  } catch (err: any) {
+    console.error(`[Tool] Error en ${name}:`, err);
+    return `Error ejecutando ${name}: ${err.message}`;
+  }
+};
+
+// --- Core agent runner using direct Ollama/OpenAI API ---
+const runOllamaAgent = async (
+  model: string,
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+): Promise<string> => {
+  const toolDefs = buildToolDefinitions();
+  const MAX_TOOL_ROUNDS = 5;
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const response = await ollamaClient.chat.completions.create({
+      model,
+      messages,
+      tools: toolDefs.length > 0 ? toolDefs : undefined,
+    });
+
+    const choice = response.choices[0];
+    if (!choice) {
+      throw new Error('Ollama no devolvió ninguna opción de respuesta.');
+    }
+
+    const assistantMessage = choice.message;
+
+    // If the model wants to call tools, execute them and loop back
+    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      // Add the assistant message with tool_calls to the conversation
+      messages.push(assistantMessage);
+
+      for (const toolCall of assistantMessage.tool_calls) {
+        if (toolCall.type === 'function') {
+          const result = await executeTool(toolCall.function.name, toolCall.function.arguments);
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: result,
+          });
+        }
+      }
+
+      // Continue the loop — the model will see the tool results and respond
+      continue;
+    }
+
+    // No tool calls — return the text response
+    const content = assistantMessage.content?.trim();
+    if (content) {
+      return content;
+    }
+
+    throw new Error('Ollama devolvió una respuesta vacía.');
+  }
+
+  throw new Error('Se alcanzó el límite de rondas de herramientas sin respuesta final.');
+};
+
+// --- Public API ---
+export const runAgent = async (contextKey: string, userInput: string) => {
+  return runAgentWithProgress(contextKey, userInput);
+};
+
+export const runAgentWithProgress = async (
+  contextKey: string,
+  userInput: string,
+  onProgress?: (snapshot: {
+    status: string;
+    partialText?: string;
+    currentTool?: string;
+    recentTools?: string[];
+    planItems?: string[];
+  }) => void,
+  signal?: AbortSignal,
+) => {
+  const history = await repository.getContextMessages(contextKey);
+  const settings = await repository.getContextAgentSettings(contextKey);
+  const launchProfile = getLaunchProfile(settings.launchProfile);
+  const codexModel = settings.codexModel || launchProfile?.codexModel || config.OLLAMA_MODEL;
+
+  const systemPrompt = buildDeltaSystemPrompt(cachedSkillsPrompt);
+
+  // Build the messages array in OpenAI chat format
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt },
+    ...history.map((m: any) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+    { role: 'user', content: userInput },
+  ];
+
+  // Persist the user message
+  await repository.addContextMessage(contextKey, 'user', userInput);
+  await repository.updateContextAgentSettings(contextKey, {
+    ...settings,
+    backend: 'ollama',
+    lastPrompt: userInput,
+    codexModel,
+    codexReasoningEffort: undefined,
+    codexSessionId: undefined,
+    launchProfile: settings.launchProfile,
+  });
+
+  try {
+    onProgress?.({ status: 'Usando backend Ollama' });
+    const result = await runOllamaAgent(codexModel, messages);
+    await repository.addContextMessage(contextKey, 'assistant', result);
+    return result;
+  } catch (err: any) {
+    console.error('Error in runAgent with Ollama:', err);
+    return `Creador, Ollama ha fallado: ${err.message}`;
+  }
+};

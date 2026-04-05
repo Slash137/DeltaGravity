@@ -1,0 +1,10 @@
+[Unit]
+Description=Run DeltaGravity watchdog periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=deltagravity-watchdog.service
+
+[Install]
+WantedBy=timers.target

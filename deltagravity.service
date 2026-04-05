@@ -1,0 +1,16 @@
+[Unit]
+Description=DeltaGravity Telegram Bot Native
+After=network.target
+
+[Service]
+Type=simple
+User=cayetano
+WorkingDirectory=/home/cayetano/Proyectos/DeltaGravity
+ExecStart=/bin/bash /home/cayetano/Proyectos/DeltaGravity/start.sh
+Restart=always
+RestartSec=10
+Environment=PATH=/usr/bin:/usr/local/bin
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

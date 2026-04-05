@@ -1,109 +1,117 @@
-import { Bot, InputFile } from 'grammy';
-
-import { config } from './config.js';
+import { Telegraf, Context } from 'telegraf';
+import { message } from 'telegraf/filters';
 import { runAgent } from './lib/agent.js';
 import { repository } from './lib/database.js';
-import { transcribeAudio, generateSpeech } from './lib/llm.js';
+import { config } from './config.js';
 
+// Timeout de 5 minutos para modelos locales lentos (default de Telegraf es 90s)
+export const bot = new Telegraf<Context>(config.TELEGRAM_BOT_TOKEN, {
+  handlerTimeout: 300_000,
+});
 
-export const bot = new Bot(config.TELEGRAM_BOT_TOKEN);
+bot.start((ctx) => sendSimpleReply(ctx, '<b>DeltaGravity Online.</b> Usa <code>/model [nombre]</code> para cambiar el cerebro.'));
 
-// Whitelist Middleware
-bot.use(async (ctx, next) => {
-  const userId = ctx.from?.id;
-  if (!userId || !config.TELEGRAM_ALLOWED_USER_IDS.includes(userId)) {
-    console.warn(`Unauthorized access attempt from user: ${userId}`);
-    if (userId) await ctx.reply(`Acceso denegado. Tu ID de usuario es: ${userId}`);
+// Comando para cambiar el modelo
+bot.command('model', async (ctx) => {
+  if (!ctx.message || !('text' in ctx.message)) return;
+  
+  const text = ctx.message.text;
+  const newModel = text.split(' ').slice(1).join(' ').trim();
+
+  const contextKey = ctx.chat.id.toString();
+  const settings = await repository.getContextAgentSettings(contextKey);
+
+  if (!newModel) {
+    const currentModel = settings.codexModel || config.OLLAMA_MODEL;
+    return sendSimpleReply(ctx, `🧠 Modelo actual: <code>${currentModel}</code>\n\nUso: <code>/model mistral-small:24b</code>`);
+  }
+
+  await repository.updateContextAgentSettings(contextKey, { ...settings, codexModel: newModel });
+  await sendSimpleReply(ctx, `🚀 Cerebro actualizado a: <code>${newModel}</code>`);
+});
+
+bot.command('status', async (ctx) => {
+  const contextKey = ctx.chat.id.toString();
+  const settings = await repository.getContextAgentSettings(contextKey);
+  const currentModel = settings.codexModel || config.OLLAMA_MODEL;
+  await sendSimpleReply(ctx, `<b>ESTADO:</b> ✅ Operacional\n<b>CEREBRO:</b> 🤖 <code>${currentModel}</code>`);
+});
+
+bot.command('clear', async (ctx) => {
+  try {
+    const contextKey = ctx.chat.id.toString();
+    await repository.clearContextHistory(contextKey);
+    await sendSimpleReply(ctx, '<b>MEMORIA LIMPIA.</b> 🧹 ¡Hola de nuevo, Creador!');
+  } catch (err) {
+    console.error(err);
+    await sendSimpleReply(ctx, '❌ <b>Error</b> al borrar la memoria.');
+  }
+});
+
+bot.command('briefing', async (ctx) => {
+  const typingInterval = setInterval(() => {
+    ctx.sendChatAction('typing').catch(() => {});
+  }, 4000);
+
+  try {
+    await sendSimpleReply(ctx, '📰 <b>Preparando tu briefing...</b> dame un momento.');
+    await ctx.sendChatAction('typing');
+    
+    const { triggerBriefing } = await import('./lib/daily-briefing.js');
+    const briefing = await triggerBriefing();
+    
+    await sendSimpleReply(ctx, briefing);
+  } catch (err) {
+    console.error(err);
+    await sendSimpleReply(ctx, '❌ <b>Error</b> generando el briefing.');
+  } finally {
+    clearInterval(typingInterval);
+  }
+});
+
+// Helper robusto para enviar mensajes con HTML y manejo de chunks
+const sendSimpleReply = async (ctx: Context, text: string) => {
+  const MAX_LENGTH = 4096;
+  
+  // Limpieza defensiva de caracteres que pueden romper el HTML si no vienen bien escapados
+  // Pero permitimos las etiquetas básicas que usa Delta
+  let safeText = text;
+  
+  if (safeText.length <= MAX_LENGTH) {
+    try {
+      await ctx.reply(safeText, { parse_mode: 'HTML' });
+    } catch {
+      await ctx.reply(safeText); // Fallback si falla el parseo HTML
+    }
     return;
   }
-  return await next();
-});
 
-bot.command('start', (ctx) => ctx.reply('DeltaGravity operativo. ¿En qué puedo ayudarte?'));
-bot.command('clear', async (ctx) => {
-  await repository.clearHistory(ctx.from!.id);
-  await ctx.reply('Memoria de conversación limpiada.');
-});
-
-bot.on('message:text', async (ctx) => {
-  const userId = ctx.from.id;
-  const text = ctx.message.text;
-
-  await ctx.replyWithChatAction('typing');
-  
-  try {
-    const response = await runAgent(userId, text);
-    
-    // Si la respuesta es corta o el usuario lo ha pedido, podemos usar voz.
-    // Para simplificar, si ElevenLabs está configurado, enviaremos AMBOS o solo voz si se pide.
-    // Por ahora, enviaremos texto y, si el usuario pide voz explícitamente, enviaremos audio.
-    const lowerText = text.toLowerCase();
-    const wantsVoice = lowerText.includes('voz') || lowerText.includes('audio') || lowerText.includes('habla') || lowerText.includes('di');
-
-    if (config.ELEVENLABS_API_KEY && wantsVoice) {
-      await ctx.replyWithChatAction('record_voice');
-      try {
-        const audioBuffer = await generateSpeech(response);
-        await ctx.replyWithVoice(new InputFile(audioBuffer));
-      } catch (ttsError) {
-        console.error('Error in TTS for text msg:', ttsError);
-        await ctx.reply(response);
-      }
-    } else {
-      await ctx.reply(response);
+  for (let i = 0; i < safeText.length; i += MAX_LENGTH) {
+    const chunk = safeText.substring(i, i + MAX_LENGTH);
+    try {
+      await ctx.reply(chunk, { parse_mode: 'HTML' });
+    } catch {
+      await ctx.reply(chunk);
     }
-
-  } catch (error) {
-    console.error('Error in bot:', error);
-    await ctx.reply('Lo siento, ha ocurrido un error al procesar tu mensaje.');
   }
-});
+};
 
-bot.on(['message:voice', 'message:audio'], async (ctx) => {
-  const userId = ctx.from.id;
-  await ctx.replyWithChatAction('typing');
+// Listener principal de texto
+bot.on(message('text'), async (ctx) => {
+  // Indicador de "escribiendo..." que se refresca cada 4 segundos
+  const typingInterval = setInterval(() => {
+    ctx.sendChatAction('typing').catch(() => {});
+  }, 4000);
 
   try {
-    const file = await ctx.getFile();
-    if (!file.file_path) {
-      await ctx.reply('Lo siento, no he podido descargar el audio.');
-      return;
-    }
-
-    const url = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    const response = await fetch(url);
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    const transcribedText = await transcribeAudio(buffer, 'audio.ogg');
-
-    if (!transcribedText || transcribedText.trim() === '') {
-      await ctx.reply('No he logrado entender el audio. ¿Podrías repetirlo?');
-      return;
-    }
-
-    await ctx.reply(`_Escuchado: "${transcribedText}"_`, { parse_mode: 'Markdown' });
-
-    const agentResponse = await runAgent(userId, `[Mensaje de voz]: ${transcribedText}`);
-    
-    if (config.ELEVENLABS_API_KEY) {
-      await ctx.replyWithChatAction('record_voice');
-      try {
-        const audioBuffer = await generateSpeech(agentResponse);
-        await ctx.replyWithVoice(new InputFile(audioBuffer));
-      } catch (ttsError) {
-        console.error('Error in TTS:', ttsError);
-        await ctx.reply(agentResponse);
-      }
-    } else {
-      await ctx.reply(agentResponse);
-    }
-
+    await ctx.sendChatAction('typing');
+    const contextKey = ctx.chat.id.toString();
+    const result = await runAgent(contextKey, ctx.message.text);
+    await sendSimpleReply(ctx, result);
   } catch (error) {
-    console.error('Error handling voice:', error);
-    await ctx.reply('Lo siento, ha ocurrido un error al procesar tu nota de voz.');
+    console.error(error);
+    await sendSimpleReply(ctx, `❌ <b>Ha ocurrido un error</b> al procesar tu mensaje.`);
+  } finally {
+    clearInterval(typingInterval);
   }
 });
-
-process.once('SIGINT', () => bot.stop());
-process.once('SIGTERM', () => bot.stop());

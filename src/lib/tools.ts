@@ -9,10 +9,46 @@ export interface Tool {
   handler: (args: any) => Promise<string>;
 }
 
-const customToolsPath = path.join(process.cwd(), 'src', 'custom_tools');
-if (!fs.existsSync(customToolsPath)) {
-  fs.mkdirSync(customToolsPath, { recursive: true });
+const sourceCustomToolsPath = path.join(process.cwd(), 'src', 'custom_tools');
+const compiledCustomToolsPath = path.join(process.cwd(), 'dist', 'custom_tools');
+
+for (const toolsPath of [sourceCustomToolsPath, compiledCustomToolsPath]) {
+  if (!fs.existsSync(toolsPath)) {
+    fs.mkdirSync(toolsPath, { recursive: true });
+  }
 }
+
+const importToolModule = async (filePath: string) => {
+  const fileUrl = pathToFileURL(filePath).href;
+  return import(`${fileUrl}?update=${Date.now()}`);
+};
+
+const transpileToolToRuntime = async (name: string, code: string) => {
+  const ts = await import('typescript');
+  const result = ts.transpileModule(code, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Node10,
+      esModuleInterop: true,
+    },
+    fileName: `${name}.ts`,
+    reportDiagnostics: true,
+  });
+
+  const diagnostics = result.diagnostics ?? [];
+  const errors = diagnostics
+    .filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)
+    .map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+
+  if (errors.length > 0) {
+    throw new Error(errors.join('\n'));
+  }
+
+  const runtimePath = path.join(compiledCustomToolsPath, `${name}.js`);
+  fs.writeFileSync(runtimePath, result.outputText, 'utf8');
+  return runtimePath;
+};
 
 export const tools: Record<string, Tool> = {
   get_current_time: {
@@ -41,15 +77,14 @@ export const tools: Record<string, Tool> = {
     handler: async ({ name, code }: { name: string, code: string }) => {
       // Clean potential markdown blocks passed inside the code argument
       const cleanCode = code.replace(/^```(typescript|ts|javascript|js)?\n/m, '').replace(/\n```$/m, '');
-      const filePath = path.join(customToolsPath, `${name}.ts`);
+      const filePath = path.join(sourceCustomToolsPath, `${name}.ts`);
       
       fs.writeFileSync(filePath, cleanCode);
       
       try {
-        // Generar una ruta absoluta limpia y forzar la recarga con un timestamp único
-        const absolutePath = path.resolve(filePath);
-        const fileUrl = pathToFileURL(absolutePath).href;
-        const mod = await import(`${fileUrl}?update=${Date.now()}`);
+        const runtimePath = await transpileToolToRuntime(name, cleanCode);
+        const absolutePath = path.resolve(runtimePath);
+        const mod = await importToolModule(absolutePath);
         const newTool = mod.default;
 
         if (newTool && newTool.name && newTool.handler) {
@@ -93,13 +128,32 @@ export const tools: Record<string, Tool> = {
 };
 
 const loadCustomTools = async () => {
-  if (fs.existsSync(customToolsPath)) {
-    const files = fs.readdirSync(customToolsPath).filter(f => f.endsWith('.ts'));
+  const runtimeFiles = fs.existsSync(compiledCustomToolsPath)
+    ? fs.readdirSync(compiledCustomToolsPath).filter(f => f.endsWith('.js') || f.endsWith('.mjs') || f.endsWith('.cjs'))
+    : [];
+
+  if (runtimeFiles.length > 0) {
+    for (const file of runtimeFiles) {
+      try {
+        const filePath = path.join(compiledCustomToolsPath, file);
+        const mod = await importToolModule(filePath);
+        if (mod.default && mod.default.name) {
+          tools[mod.default.name] = mod.default;
+          console.log(`Loaded custom tool: ${mod.default.name}`);
+        }
+      } catch (e) {
+        console.error(`Failed to load custom tool ${file}:`, e);
+      }
+    }
+    return;
+  }
+
+  if (fs.existsSync(sourceCustomToolsPath)) {
+    const files = fs.readdirSync(sourceCustomToolsPath).filter(f => f.endsWith('.ts') || f.endsWith('.js') || f.endsWith('.mjs'));
     for (const file of files) {
       try {
-        const filePath = path.join(customToolsPath, file);
-        const fileUrl = pathToFileURL(filePath).href;
-        const mod = await import(fileUrl);
+        const filePath = path.join(sourceCustomToolsPath, file);
+        const mod = await importToolModule(filePath);
         if (mod.default && mod.default.name) {
           tools[mod.default.name] = mod.default;
           console.log(`Loaded custom tool: ${mod.default.name}`);
