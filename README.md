@@ -70,7 +70,7 @@ Para que Delta esté siempre activo en tu servidor Ubuntu:
 - `get_briefing_news_detail`: Recupera contexto extendido de noticias del briefing.
 - `internet_search`: Realiza búsquedas en la web para obtener información actualizada.
 - `get_current_time`: Devuelve la hora local del servidor.
-- `weather`: Consulta el pornostic meteorológico detallado.
+- `weather`: Consulta el pronóstico meteorológico detallado.
 
 ## 🛡 Seguridad
 
