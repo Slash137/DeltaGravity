@@ -1,120 +1,77 @@
 # DeltaGravity
 
-DeltaGravity is a local, secure, and private AI agent that uses Telegram as its interface.
+DeltaGravity es un agente de IA personal, seguro y privado que utiliza Telegram como su interfaz principal. Ejecuta modelos locales a través de **Ollama** y tiene acceso directo a la terminal del sistema para realizar tareas complejas.
 
-## Features
+## 🌟 Características Principales
 
-- **Cloud Persistence**: Uses Firebase Firestore to store conversation history and memory.
-- **Agent Loop**: Capable of multi-step reasoning and tool usage.
-- **Voice Support (End-to-End)**: Send voice notes transcribed by Whisper, get audio responses via ElevenLabs.
-- **Telegram Interface**: Interact with your agent from anywhere via Telegram.
-- **Modular Design**: Easy to extend with new tools and providers.
+- **Briefing Matutino Inteligente**: Genera resúmenes diarios a las 9:00 AM con el tiempo, noticias de actualidad y frases célebres.
+- **Detalle de Noticias**: Permite profundizar en cualquier noticia del briefing simplemente pidiendo "más detalles sobre la noticia X".
+- **Formato HTML Premium**: Todos los mensajes de Delta están formateados elegantemente con el sistema de etiquetas HTML de Telegram.
+- **Acceso a Shell Nativo**: Capacidad para ejecutar comandos, buscar archivos y gestionar el sistema a través de `execute_command`.
+- **Memoria Persistente**: Utiliza Firebase Firestore para recordar conversaciones y preferencias entre sesiones.
+- **Identidad Única**: Delta tiene una personalidad firme, técnica y resolutiva, diseñada para ser tu copiloto tecnológico.
 
-## Requirements
+## 🛠 Instalación y Configuración
 
-- Node.js 18+
-- Groq API Key
+### Requisitos
+- Node.js 20+
+- Ollama (configurado con modelos como `qwen2.5-coder`, `mistral-small`, etc.)
+- Firebase Project (para la base de datos Firestore)
 - Telegram Bot Token
 
-## Installation
-
-1. Clone the repository.
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Configure your environment:
-   Create a `.env` file based on the provided template and add your credentials.
-   ```bash
-   TELEGRAM_BOT_TOKEN="your_token"
-   TELEGRAM_ALLOWED_USER_IDS="your_id"
-   GROQ_API_KEY="your_groq_key"
-   ```
-
-## Usage
-
-Start the agent in development mode:
+### Configuración del Entorno
+Crea un archivo `.env` basado en `.env.example`:
 
 ```bash
+TELEGRAM_BOT_TOKEN="tu_token_de_bot"
+TELEGRAM_ALLOWED_USER_IDS="tu_id_de_usuario"
+OLLAMA_BASE_URL="http://localhost:11434"
+OLLAMA_MODEL="mistral-small:24b"
+```
+
+### Ejecución Nativa (Recomendado)
+Para una mayor integración con el sistema y capacidad de ejecución de comandos, se recomienda el despliegue nativo:
+
+```bash
+# Instalación de dependencias
+npm install
+
+# Iniciar en modo desarrollo
 npm run dev
 ```
 
-## Run At Boot
+## 🚀 Despliegue como Servicio de Sistema
 
-To ensure DeltaGravity is recreated automatically after a host reboot, install the included `systemd` unit:
+Para que Delta esté siempre activo en tu servidor Ubuntu:
 
-```bash
-sudo cp deltagravity.service /etc/systemd/system/deltagravity.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now deltagravity.service
-```
+1. **Configurar el servicio**:
+   ```bash
+   sudo cp deltagravity.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now deltagravity.service
+   ```
 
-This uses `docker compose up -d` on boot, so it recreates the container even if it does not already exist.
+2. **Logs en tiempo real**:
+   ```bash
+   tail -f term.log
+   ```
 
-To recover automatically from silent hangs, install the watchdog timer too:
+## 🤖 Comandos Útiles en Telegram
 
-```bash
-chmod +x scripts/watchdog.sh
-sudo cp deltagravity-watchdog.service /etc/systemd/system/deltagravity-watchdog.service
-sudo cp deltagravity-watchdog.timer /etc/systemd/system/deltagravity-watchdog.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now deltagravity-watchdog.timer
-```
+- `/briefing`: Genera un briefing matutino al instante.
+- `/model [nombre]`: Cambia el modelo de Ollama que Delta está usando.
+- `/status`: Muestra el estado del agente y el modelo actual.
+- `/clear`: Borra la memoria a corto plazo de la conversación.
+- `detállame la noticia X`: (Después de un briefing) Recupera la información completa de una noticia específica.
 
-The container now exposes `/healthz`, Docker marks it as unhealthy if the event loop or Telegram probe stops responding, and the watchdog restarts the container when that happens.
+## 🔧 Herramientas del Agente
 
-## Backends via Telegram
+- `execute_command`: Ejecuta comandos de shell en el host.
+- `get_briefing_news_detail`: Recupera contexto extendido de noticias del briefing.
+- `internet_search`: Realiza búsquedas en la web para obtener información actualizada.
+- `get_current_time`: Devuelve la hora local del servidor.
+- `weather`: Consulta el pornostic meteorológico detallado.
 
-DeltaGravity can use `codex`, `router`, or a remote `ollama` backend for Telegram conversations.
+## 🛡 Seguridad
 
-Environment variables:
-
-```bash
-AGENT_BACKEND="ollama"
-OLLAMA_BASE_URL="http://192.168.3.50:11434"
-OLLAMA_MODEL="qwen2.5-coder:14b"
-CODEX_BIN="codex"
-CODEX_DEFAULT_CWD="/home/cayetano/Proyectos"
-CODEX_FULL_AUTO="true"
-CODEX_DANGEROUS_BYPASS="false"
-```
-
-Useful Telegram commands:
-
-- `/backend codex`, `/backend router`, or `/backend ollama`
-- `/cwd /absolute/path/to/project`
-- `/status`
-- `/resetcodex`
-- `/clear`
-
-Recommended flow:
-
-1. Set `/cwd` to the repository you want Codex to work on.
-2. Send your task in Telegram.
-3. DeltaGravity resumes the same Codex session for subsequent messages in that chat until you run `/resetcodex` or `/clear`.
-
-## Codex -> Telegram notifications
-
-This repository now includes a repo-local `hooks.json` for Codex. When Codex finishes a turn inside this project, it triggers a `Stop` hook and sends a Telegram message through the same bot used by DeltaGravity.
-
-Required environment variables:
-
-```bash
-TELEGRAM_BOT_TOKEN="your_token"
-TELEGRAM_ALLOWED_USER_IDS="your_telegram_user_id"
-TELEGRAM_NOTIFY_CHAT_ID="your_private_chat_id"
-```
-
-Notes:
-
-- `TELEGRAM_NOTIFY_CHAT_ID` is optional. If omitted, the hook uses the first ID from `TELEGRAM_ALLOWED_USER_IDS`.
-- This works on another device after cloning the repo as long as that device also has the same environment variables in `.env`.
-- Secrets are not committed to git. Use `.env.example` as the template.
-
-## Tools
-
-- `get_current_time`: Returns the current local time.
-
-## Security
-
-DeltaGravity includes a whitelist for Telegram User IDs. Only allowed users can interact with the agent.
+DeltaGravity incluye una lista blanca de IDs de Telegram. Solo los usuarios autorizados en `TELEGRAM_ALLOWED_USER_IDS` pueden interactuar con el agente, garantizando que tu Shell y tus datos estén protegidos.
